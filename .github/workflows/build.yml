@@ -3,6 +3,7 @@ name: Build APK
 on:
   push:
     branches: [ "main", "master" ]
+    tags: [ "v*" ]
   pull_request:
     branches: [ "main", "master" ]
 
@@ -31,3 +32,10 @@ jobs:
       with:
         name: app-release
         path: app/build/outputs/apk/release/app-release-unsigned.apk
+
+    - name: Release
+      uses: softprops/action-gh-release@v2
+      if: startsWith(github.ref, 'refs/tags/')
+      with:
+        files: app/build/outputs/apk/release/app-release-unsigned.apk
+        generate_release_notes: true
