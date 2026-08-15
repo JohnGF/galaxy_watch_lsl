@@ -1,4 +1,4 @@
-package com.nautilus.watchstreamer
+package com.nautilus.watchstreamer.mobile
 
 import android.Manifest
 import android.app.Activity

@@ -4,7 +4,7 @@ plugins {
 }
 
 android {
-    namespace = "com.nautilus.watchstreamer"
+    namespace = "com.nautilus.watchstreamer.mobile"
     compileSdk = 34
 
     defaultConfig {
