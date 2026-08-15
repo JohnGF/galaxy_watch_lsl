@@ -14,4 +14,6 @@
 .cxx
 local.properties
 /app/build
-app-release-unsigned.apk
+app-debug.apk
+mobile/build/
+*.apk
