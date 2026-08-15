@@ -27,15 +27,15 @@ jobs:
     - name: Build with Gradle
       run: ./gradlew assembleRelease
 
-    - name: Upload APK
+    - name: Upload Watch APK
       uses: actions/upload-artifact@v4
       with:
-        name: app-release
-        path: app/build/outputs/apk/release/app-release-unsigned.apk
+        name: watch-app-release
+        path: app/build/outputs/apk/release/*.apk
 
-    - name: Release
-      uses: softprops/action-gh-release@v2
-      if: startsWith(github.ref, 'refs/tags/')
+    - name: Upload Mobile APK
+      uses: actions/upload-artifact@v4
       with:
-        files: app/build/outputs/apk/release/app-release-unsigned.apk
-        generate_release_notes: true
+        name: mobile-app-release
+        path: mobile/build/outputs/apk/release/*.apk
+
