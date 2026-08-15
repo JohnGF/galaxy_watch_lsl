@@ -14,4 +14,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "GalaxyWatchLSL"
-include(":app")
+include(":app", ":mobile")
