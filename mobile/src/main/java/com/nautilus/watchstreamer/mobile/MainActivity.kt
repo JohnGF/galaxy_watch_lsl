@@ -26,6 +26,8 @@ import androidx.core.content.ContextCompat
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
+import com.nautilus.watchstreamer.core.StreamHelper
+import com.nautilus.watchstreamer.core.StreamState
 import java.util.concurrent.Executors
 
 class MainActivity : Activity(), SensorEventListener {
@@ -43,14 +45,7 @@ class MainActivity : Activity(), SensorEventListener {
     private var socket: DatagramSocket? = null
     private val executor = Executors.newSingleThreadExecutor()
 
-    private var lastAccel = floatArrayOf(0f, 0f, 0f)
-    private var lastGyro = floatArrayOf(0f, 0f, 0f)
-    private var lastHr = 0f
-
-    // Touch values
-    private var touchX = -1f
-    private var touchY = -1f
-    private var isTouched = 0 // 1 if active touch, 0 otherwise
+    private val streamState = StreamState()
 
     private var packetCount = 0L
 
@@ -137,16 +132,16 @@ class MainActivity : Activity(), SensorEventListener {
 
                 when (event.actionMasked) {
                     MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
-                        touchX = event.x
-                        touchY = event.y
-                        isTouched = 1
-                        tvTouchStatus.text = "X: ${touchX.toInt()}, Y: ${touchY.toInt()}"
+                        streamState.touchX = event.x
+                        streamState.touchY = event.y
+                        streamState.isTouched = 1
+                        tvTouchStatus.text = "X: ${streamState.touchX.toInt()}, Y: ${streamState.touchY.toInt()}"
                     }
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                        touchX = event.x
-                        touchY = event.y
-                        isTouched = 0
-                        tvTouchStatus.text = "Released (X: ${touchX.toInt()}, Y: ${touchY.toInt()})"
+                        streamState.touchX = event.x
+                        streamState.touchY = event.y
+                        streamState.isTouched = 0
+                        tvTouchStatus.text = "Released (X: ${streamState.touchX.toInt()}, Y: ${streamState.touchY.toInt()})"
                     }
                 }
                 sendUdpPacket()
@@ -236,30 +231,31 @@ class MainActivity : Activity(), SensorEventListener {
 
         when (event.sensor.type) {
             Sensor.TYPE_ACCELEROMETER -> {
-                lastAccel[0] = event.values[0]
-                lastAccel[1] = event.values[1]
-                lastAccel[2] = event.values[2]
+                val values = StreamHelper.convertIMUData(event.values)
+                streamState.accelX = values[0]
+                streamState.accelY = values[1]
+                streamState.accelZ = values[2]
                 sendUdpPacket()
             }
             Sensor.TYPE_GYROSCOPE -> {
-                lastGyro[0] = event.values[0]
-                lastGyro[1] = event.values[1]
-                lastGyro[2] = event.values[2]
+                val values = StreamHelper.convertIMUData(event.values)
+                streamState.gyroX = values[0]
+                streamState.gyroY = values[1]
+                streamState.gyroZ = values[2]
             }
             Sensor.TYPE_HEART_RATE -> {
-                lastHr = event.values[0]
+                streamState.heartRate = StreamHelper.convertPPGData(event.values[0])
             }
         }
     }
 
     private fun sendUdpPacket() {
-        val payload = "${lastAccel[0]},${lastAccel[1]},${lastAccel[2]},${lastGyro[0]},${lastGyro[1]},${lastGyro[2]},$lastHr,$touchX,$touchY,$isTouched"
-        val bytes = payload.toByteArray()
+        val payload = StreamHelper.formatLSLData(streamState)
 
         executor.execute {
             try {
                 val address = InetAddress.getByName(targetIp)
-                val packet = DatagramPacket(bytes, bytes.size, address, targetPort)
+                val packet = StreamHelper.createDatagramPacket(payload, address, targetPort)
                 socket?.send(packet)
                 packetCount++
             } catch (e: Exception) {
