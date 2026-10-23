@@ -22,6 +22,17 @@ graph LR
 - **Dual Support:** Modules provided for both Wear OS (e.g., Galaxy Watch) and standard Android devices.
 - **Keep-alive Screen:** Prevents the device from sleeping during long recording sessions to maintain continuous data flow.
 
+## Packet Format
+
+Data is sent over UDP, with each packet containing a single line of CSV-formatted text. The format is as follows:
+
+```csv
+accX,accY,accZ,gyroX,gyroY,gyroZ,hr,touchX,touchY,isTouched,timestampNs
+```
+
+*   **`timestampNs`**: the acquisition time of the sample. A packet is sent on every accelerometer event, stamped with `SensorEvent.timestamp`; gyroscope and heart-rate values ride along as their latest readings. Touch packets use `SystemClock.elapsedRealtimeNanos()`. Both run on the same clock base.
+*   This payload string is constructed in `core/StreamState.toPayloadString()` and is verified by tests in `StreamHelperTest`.
+
 ## Setup & Installation
 
 ### WearOS / Android Installation
@@ -35,6 +46,32 @@ graph LR
 2. Find your PC's IP Address (e.g., `192.168.137.1`).
 3. Open the WatchStreamer app on your device, enter the PC's IP address, and tap **"START STREAMING"**.
 
+## Connecting to Nautilus BCI
+
+This application is designed to integrate with [nautilus_bci](https://github.com/JohnGF/nautilus_bci).
+
+To receive the streamed data on your PC, run the bridge script provided in the nautilus_bci repository from its root directory:
+
+```bash
+uv run python scripts/bridges/smartwatch_lsl_bridge.py --mode udp --port 5005
+```
+
+*(Note: The app streams to UDP port 5005 by default, so you must explicitly specify `--port 5005` as the bridge defaults to 8080).*
+
+This bridge script receives the UDP packets and publishes them as Lab Streaming Layer (LSL) streams `Smartwatch_IMU` and `Smartwatch_PPG`. It maps the `timestampNs` field onto the local LSL time, preserving the original acquisition time of the sensor data rather than the network arrival time.
+
 ## Project Structure
 - `:app` - Wear OS application module containing the UI and logic for smartwatches.
 - `:mobile` - Standard Android application module containing the UI and logic for smartphones.
+
+## Troubleshooting
+
+If you are having trouble connecting the app to your PC, check the following:
+
+1.  **Network**: Ensure both the Android device (watch or phone) and the receiving PC are connected to the **same Wi-Fi network**.
+2.  **Target IP**: Ensure you have correctly entered the PC's IP address into the watch or phone app before pressing "Start Streaming".
+3.  **Firewall (App)**: Check that the firewall on the receiving PC allows incoming UDP packets on the target port (default: 5005).
+4.  **Firewall (LSL)**: For the Lab Streaming Layer to function properly on the network, LSL requires specific ports to be open on your PC:
+    *   **UDP**: 16571 - 16636
+    *   **TCP**: 16572 - 16636
+    *   For a detailed walkthrough, refer to the [nautilus_bci LSL network/firewall guide](https://github.com/JohnGF/nautilus_bci/blob/feature/gpype-pipeline/docs/guides/lsl_network_setup.md).
