@@ -12,6 +12,7 @@ import android.os.Bundle
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.PowerManager
+import android.os.SystemClock
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
@@ -144,6 +145,7 @@ class MainActivity : Activity(), SensorEventListener {
                         tvTouchStatus.text = "Released (X: ${streamState.touchX.toInt()}, Y: ${streamState.touchY.toInt()})"
                     }
                 }
+                streamState.timestampNs = SystemClock.elapsedRealtimeNanos()
                 sendUdpPacket()
                 true
             }
@@ -235,6 +237,7 @@ class MainActivity : Activity(), SensorEventListener {
                 streamState.accelX = values[0]
                 streamState.accelY = values[1]
                 streamState.accelZ = values[2]
+                streamState.timestampNs = event.timestamp
                 sendUdpPacket()
             }
             Sensor.TYPE_GYROSCOPE -> {
