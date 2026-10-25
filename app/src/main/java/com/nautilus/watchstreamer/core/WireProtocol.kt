@@ -14,8 +14,16 @@ object WireProtocol {
     const val HR = "HR"
     const val TOUCH = "TOUCH"
     const val HEARTBEAT = "HB"
+    const val ECHO = "ECHO"
+    private const val PING_PREFIX = "W2P|"
 
     val LOCATIONS = listOf("L_wrist", "R_wrist", "L_ankle", "R_ankle")
+
+    /** Ping id from a bridge clock-sync ping ("W2P|<id>"), or null for anything else. */
+    fun parsePing(text: String): Int? {
+        if (!text.startsWith(PING_PREFIX)) return null
+        return text.substring(PING_PREFIX.length).trim().toIntOrNull()
+    }
 
     class Sample(val timestampNs: Long, val values: FloatArray)
 
