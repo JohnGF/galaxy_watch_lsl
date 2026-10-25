@@ -28,6 +28,14 @@ class StreamHelperTest {
     }
 
     @Test
+    fun testFormatHeartbeat() {
+        val expected = "HB,1200,3,87,123456789012345"
+        assertEquals(expected, StreamHelper.formatHeartbeat(1200L, 3L, 87, 123456789012345L))
+        // Must stay under the 6 fields the bridge needs before it treats a packet as IMU
+        assertEquals(5, expected.split(",").size)
+    }
+
+    @Test
     fun testCreateDatagramPacket() {
         val payload = "1.0,2.0,3.0"
         val ipAddress = InetAddress.getByName("127.0.0.1")
