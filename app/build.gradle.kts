@@ -11,8 +11,8 @@ android {
         applicationId = "com.nautilus.watchstreamer"
         minSdk = 30  // Wear OS 3+ (Galaxy Watch 7 runs Wear OS 5 / SDK 34)
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.2"
     }
 
     buildTypes {

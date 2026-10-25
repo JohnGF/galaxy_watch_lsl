@@ -27,6 +27,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.nautilus.watchstreamer.core.WireProtocol
 
 /**
  * Setup screen and touch surface. Streaming itself runs in [StreamingService],
@@ -51,6 +52,7 @@ class MainActivity : Activity() {
     private lateinit var tvStreamStatus: TextView
     private lateinit var tvStatus: TextView
     private lateinit var etIp: EditText
+    private lateinit var btnLocation: Button
     private lateinit var btnToggle: Button
 
     private val connection = object : ServiceConnection {
@@ -100,6 +102,18 @@ class MainActivity : Activity() {
             gravity = android.view.Gravity.CENTER
         }
 
+        // Body site of this device; the bridge names its LSL streams after it (IMU_L_wrist, ...)
+        btnLocation = Button(this).apply {
+            text = prefs().getString(StreamingService.PREF_LOCATION, WireProtocol.LOCATIONS[0])
+            textSize = 12f
+            setOnClickListener {
+                val locations = WireProtocol.LOCATIONS
+                val next = locations[(locations.indexOf(text.toString()) + 1) % locations.size]
+                text = next
+                prefs().edit().putString(StreamingService.PREF_LOCATION, next).apply()
+            }
+        }
+
         btnToggle = Button(this).apply {
             text = "START STREAMING"
             setOnClickListener {
@@ -109,6 +123,7 @@ class MainActivity : Activity() {
 
         controlsLayout.addView(tvStatus)
         controlsLayout.addView(etIp)
+        controlsLayout.addView(btnLocation)
         controlsLayout.addView(btnToggle)
 
         // Touch surface overlay when streaming
