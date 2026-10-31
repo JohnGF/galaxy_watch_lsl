@@ -20,7 +20,7 @@ graph LR
 - **Biometric streaming:** Heart rate tracking.
 - **Touch Event tracking:** X, Y coordinates and touch states for interaction capture.
 - **Dual Support:** Modules provided for both Wear OS (e.g., Galaxy Watch) and standard Android devices.
-- **Keep-alive Screen:** Prevents the device from sleeping during long recording sessions to maintain continuous data flow.
+- **Keeps streaming with the screen off (watch):** Streaming runs in a health-type foreground service with a wake lock, a bound Wi-Fi network and a low-latency Wi-Fi lock, shown as an Ongoing Activity on the watch face. Lowering the wrist or covering the watch no longer stops the stream, and the socket is rebuilt when Wi-Fi comes back.
 
 ## Packet Format
 
@@ -31,6 +31,7 @@ accX,accY,accZ,gyroX,gyroY,gyroZ,hr,touchX,touchY,isTouched,timestampNs
 ```
 
 *   **`timestampNs`**: the acquisition time of the sample. A packet is sent on every accelerometer event, stamped with `SensorEvent.timestamp`; gyroscope and heart-rate values ride along as their latest readings. Touch packets use `SystemClock.elapsedRealtimeNanos()`. Both run on the same clock base.
+*   **Heartbeat:** once a second the watch also sends `HB,sent,dropped,batteryPercent,timestampNs`. It has 5 fields, so the bridge's IMU parser (6+ fields) ignores it; newer bridges use it to tell a dropped device from a still one.
 *   This payload string is constructed in `core/StreamState.toPayloadString()` and is verified by tests in `StreamHelperTest`.
 
 ## Setup & Installation
@@ -70,8 +71,13 @@ If you are having trouble connecting the app to your PC, check the following:
 
 1.  **Network**: Ensure both the Android device (watch or phone) and the receiving PC are connected to the **same Wi-Fi network**.
 2.  **Target IP**: Ensure you have correctly entered the PC's IP address into the watch or phone app before pressing "Start Streaming".
-3.  **Firewall (App)**: Check that the firewall on the receiving PC allows incoming UDP packets on the target port (default: 5005).
-4.  **Firewall (LSL)**: For the Lab Streaming Layer to function properly on the network, LSL requires specific ports to be open on your PC:
+3.  **Stream stops when the screen goes off (watch)**:
+    *   Accept the **body sensors** permission and then **"Allow all the time"** for background body sensors; without the second one, heart rate can stop with the screen off. Over adb: `adb shell pm grant com.nautilus.watchstreamer android.permission.BODY_SENSORS_BACKGROUND`.
+    *   Accept the battery optimization exemption the app asks for on first launch (`adb shell dumpsys deviceidle whitelist +com.nautilus.watchstreamer` does the same).
+    *   On Galaxy watches, make sure the app is not in **Settings → Battery → Background usage limits → Sleeping apps**.
+    *   The on-screen status line shows `Waiting for Wi-Fi` while the watch has no Wi-Fi; packets sent in that window are counted as dropped.
+4.  **Firewall (App)**: Check that the firewall on the receiving PC allows incoming UDP packets on the target port (default: 5005).
+5.  **Firewall (LSL)**: For the Lab Streaming Layer to function properly on the network, LSL requires specific ports to be open on your PC:
     *   **UDP**: 16571 - 16636
     *   **TCP**: 16572 - 16636
     *   For a detailed walkthrough, refer to the [nautilus_bci LSL network/firewall guide](https://github.com/JohnGF/nautilus_bci/blob/feature/gpype-pipeline/docs/guides/lsl_network_setup.md).

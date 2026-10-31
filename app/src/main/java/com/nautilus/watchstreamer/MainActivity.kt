@@ -2,17 +2,20 @@ package com.nautilus.watchstreamer
 
 import android.Manifest
 import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
 import android.content.pm.PackageManager
-import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
-import android.hardware.SensorManager
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities
+import android.os.Handler
+import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
-import android.os.SystemClock
+import android.provider.Settings
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
@@ -24,46 +27,57 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import java.net.DatagramPacket
-import java.net.DatagramSocket
-import java.net.InetAddress
-import com.nautilus.watchstreamer.core.StreamHelper
-import com.nautilus.watchstreamer.core.StreamState
-import java.util.concurrent.Executors
 
-class MainActivity : Activity(), SensorEventListener {
+/**
+ * Setup screen and touch surface. Streaming itself runs in [StreamingService],
+ * so it keeps going when this Activity is paused by the screen turning off.
+ */
+class MainActivity : Activity() {
 
-    private lateinit var sensorManager: SensorManager
-    private var accelSensor: Sensor? = null
-    private var gyroSensor: Sensor? = null
-    private var hrSensor: Sensor? = null
+    companion object {
+        private const val REQUEST_PERMISSIONS = 101
+        private const val REQUEST_BACKGROUND_SENSORS = 102
+        private const val PREF_ASKED_BATTERY = "asked_battery_optimization"
+        private const val STATUS_REFRESH_MS = 1000L
+    }
 
-    private var wakeLock: PowerManager.WakeLock? = null
-
-    private var targetIp = "192.168.137.1"  // Default Hotspot IP
-    private var targetPort = 5005
-    private var isStreaming = false
-    private var socket: DatagramSocket? = null
-    private val executor = Executors.newSingleThreadExecutor()
-
-    private val streamState = StreamState()
-
-    private var packetCount = 0L
+    private var service: StreamingService? = null
+    private val uiHandler = Handler(Looper.getMainLooper())
 
     private lateinit var rootContainer: FrameLayout
     private lateinit var controlsLayout: LinearLayout
     private lateinit var touchSurface: View
     private lateinit var tvTouchStatus: TextView
+    private lateinit var tvStreamStatus: TextView
     private lateinit var tvStatus: TextView
     private lateinit var etIp: EditText
     private lateinit var btnToggle: Button
 
+    private val connection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+            service = (binder as StreamingService.LocalBinder).service
+            refreshStatus()
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            service = null
+            refreshStatus()
+        }
+    }
+
+    private val statusTicker = object : Runnable {
+        override fun run() {
+            refreshStatus()
+            uiHandler.postDelayed(this, STATUS_REFRESH_MS)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
-        // Keep screen on continuously so watch display does not turn off or sleep app
+
+        // Keeps the touch surface visible; streaming no longer depends on the screen being on
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        
+
         rootContainer = FrameLayout(this)
 
         // Setup Controls Layout (Setup screen)
@@ -80,7 +94,7 @@ class MainActivity : Activity(), SensorEventListener {
         }
 
         etIp = EditText(this).apply {
-            setText(targetIp)
+            setText(prefs().getString(StreamingService.PREF_TARGET_IP, StreamingService.DEFAULT_TARGET_IP))
             hint = "PC Hotspot IP"
             textSize = 12f
             gravity = android.view.Gravity.CENTER
@@ -89,7 +103,7 @@ class MainActivity : Activity(), SensorEventListener {
         btnToggle = Button(this).apply {
             text = "START STREAMING"
             setOnClickListener {
-                if (isStreaming) stopStreaming() else startStreaming()
+                if (service?.isRunning == true) stopStreaming() else startStreaming()
             }
         }
 
@@ -116,11 +130,18 @@ class MainActivity : Activity(), SensorEventListener {
                 gravity = android.view.Gravity.CENTER
             }
 
+            tvStreamStatus = TextView(context).apply {
+                setTextColor(android.graphics.Color.GRAY)
+                textSize = 10f
+                gravity = android.view.Gravity.CENTER
+            }
+
             val innerLayout = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = android.view.Gravity.CENTER
                 addView(tvHint)
                 addView(tvTouchStatus)
+                addView(tvStreamStatus)
             }
 
             addView(innerLayout, FrameLayout.LayoutParams(
@@ -129,24 +150,18 @@ class MainActivity : Activity(), SensorEventListener {
             ))
 
             setOnTouchListener { _, event ->
-                if (!isStreaming) return@setOnTouchListener false
+                val s = service?.takeIf { it.isRunning } ?: return@setOnTouchListener false
 
                 when (event.actionMasked) {
                     MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> {
-                        streamState.touchX = event.x
-                        streamState.touchY = event.y
-                        streamState.isTouched = 1
-                        tvTouchStatus.text = "X: ${streamState.touchX.toInt()}, Y: ${streamState.touchY.toInt()}"
+                        s.onTouch(event.x, event.y, true)
+                        tvTouchStatus.text = "X: ${event.x.toInt()}, Y: ${event.y.toInt()}"
                     }
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                        streamState.touchX = event.x
-                        streamState.touchY = event.y
-                        streamState.isTouched = 0
-                        tvTouchStatus.text = "Released (X: ${streamState.touchX.toInt()}, Y: ${streamState.touchY.toInt()})"
+                        s.onTouch(event.x, event.y, false)
+                        tvTouchStatus.text = "Released (X: ${event.x.toInt()}, Y: ${event.y.toInt()})"
                     }
                 }
-                streamState.timestampNs = SystemClock.elapsedRealtimeNanos()
-                sendUdpPacket()
                 true
             }
         }
@@ -155,117 +170,113 @@ class MainActivity : Activity(), SensorEventListener {
         rootContainer.addView(touchSurface)
         setContentView(rootContainer)
 
-        sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
-        accelSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-        gyroSensor = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
-        hrSensor = sensorManager.getDefaultSensor(Sensor.TYPE_HEART_RATE)
-
         checkPermissions()
+        askBatteryOptimizationOnce()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // Flag 0: attach to the service if it is running, never create it just by binding
+        bindService(Intent(this, StreamingService::class.java), connection, 0)
+        uiHandler.post(statusTicker)
+    }
+
+    override fun onStop() {
+        uiHandler.removeCallbacks(statusTicker)
+        unbindService(connection)
+        service = null
+        super.onStop()
     }
 
     override fun onBackPressed() {
-        if (isStreaming) {
+        if (service?.isRunning == true) {
             stopStreaming()
         } else {
             super.onBackPressed()
         }
     }
 
+    private fun prefs() = getSharedPreferences(StreamingService.PREFS, Context.MODE_PRIVATE)
+
     private fun checkPermissions() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.BODY_SENSORS) != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.BODY_SENSORS), 101)
+        val needed = mutableListOf(Manifest.permission.BODY_SENSORS)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            needed += Manifest.permission.POST_NOTIFICATIONS
+        }
+        val missing = needed.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
+        if (missing.isNotEmpty()) {
+            ActivityCompat.requestPermissions(this, missing.toTypedArray(), REQUEST_PERMISSIONS)
+        } else {
+            requestBackgroundSensors()
         }
     }
 
-    private fun isNetworkConnected(): Boolean {
-        val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        val network = connectivityManager.activeNetwork ?: return false
-        val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return false
-        return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQUEST_PERMISSIONS) requestBackgroundSensors()
+    }
+
+    /** Android only grants background body-sensor access as a second step, after BODY_SENSORS. */
+    private fun requestBackgroundSensors() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.BODY_SENSORS) != PackageManager.PERMISSION_GRANTED) return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.BODY_SENSORS_BACKGROUND) == PackageManager.PERMISSION_GRANTED) return
+        ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.BODY_SENSORS_BACKGROUND), REQUEST_BACKGROUND_SENSORS)
+    }
+
+    /** Doze can still stop a foreground service's network on some builds; ask once to be exempt. */
+    private fun askBatteryOptimizationOnce() {
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (powerManager.isIgnoringBatteryOptimizations(packageName)) return
+        if (prefs().getBoolean(PREF_ASKED_BATTERY, false)) return
+        prefs().edit().putBoolean(PREF_ASKED_BATTERY, true).apply()
+        try {
+            startActivity(
+                Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
+            )
+        } catch (e: ActivityNotFoundException) {
+            // Some Wear OS builds have no such settings screen; the foreground service still holds the locks
+        }
     }
 
     private fun startStreaming() {
-        if (!isNetworkConnected()) {
-            Toast.makeText(this, "No network connection. Cannot stream.", Toast.LENGTH_LONG).show()
-            tvStatus.text = "Error: No Network"
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.BODY_SENSORS) != PackageManager.PERMISSION_GRANTED) {
+            // A health foreground service cannot start without it
+            Toast.makeText(this, "Body sensors permission needed", Toast.LENGTH_LONG).show()
+            checkPermissions()
             return
         }
 
-        targetIp = etIp.text.toString().trim()
-        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "LSLStreamer::WakeLock").apply {
-            acquire(10800000L) // 3 hours max
-        }
-
-        executor.execute {
-            try {
-                socket = DatagramSocket()
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-
-        accelSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
-        gyroSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
-        hrSensor?.let { sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL) }
-
-        isStreaming = true
+        prefs().edit().putString(StreamingService.PREF_TARGET_IP, etIp.text.toString().trim()).apply()
+        ContextCompat.startForegroundService(this, Intent(this, StreamingService::class.java))
         controlsLayout.visibility = View.GONE
         touchSurface.visibility = View.VISIBLE
     }
 
     private fun stopStreaming() {
-        isStreaming = false
-        sensorManager.unregisterListener(this)
-        wakeLock?.release()
-        executor.execute {
-            socket?.close()
-            socket = null
-        }
+        val sent = service?.packetCount ?: 0L
+        stopService(Intent(this, StreamingService::class.java))
+        // Drop the stopped instance; the binding reconnects to the next one on restart
+        service = null
         touchSurface.visibility = View.GONE
         controlsLayout.visibility = View.VISIBLE
         btnToggle.text = "START STREAMING"
-        tvStatus.text = "Status: STOPPED (Sent: $packetCount)"
+        tvStatus.text = "Status: STOPPED (Sent: $sent)"
     }
 
-    override fun onSensorChanged(event: SensorEvent?) {
-        if (!isStreaming || event == null) return
-
-        when (event.sensor.type) {
-            Sensor.TYPE_ACCELEROMETER -> {
-                val values = StreamHelper.convertIMUData(event.values)
-                streamState.accelX = values[0]
-                streamState.accelY = values[1]
-                streamState.accelZ = values[2]
-                streamState.timestampNs = event.timestamp
-                sendUdpPacket()
+    private fun refreshStatus() {
+        val s = service
+        if (s == null || !s.isRunning) {
+            // Also catches a stop from the notification while this screen is open
+            if (touchSurface.visibility == View.VISIBLE && s?.isRunning == false) {
+                touchSurface.visibility = View.GONE
+                controlsLayout.visibility = View.VISIBLE
             }
-            Sensor.TYPE_GYROSCOPE -> {
-                val values = StreamHelper.convertIMUData(event.values)
-                streamState.gyroX = values[0]
-                streamState.gyroY = values[1]
-                streamState.gyroZ = values[2]
-            }
-            Sensor.TYPE_HEART_RATE -> {
-                streamState.heartRate = StreamHelper.convertPPGData(event.values[0])
-            }
+            return
         }
+        controlsLayout.visibility = View.GONE
+        touchSurface.visibility = View.VISIBLE
+        val wifi = if (s.isWifiBound) "Wi-Fi OK" else "Waiting for Wi-Fi"
+        tvStreamStatus.text = "$wifi · sent ${s.packetCount} · dropped ${s.droppedCount}"
     }
-
-    private fun sendUdpPacket() {
-        val payload = StreamHelper.formatLSLData(streamState)
-
-        executor.execute {
-            try {
-                val address = InetAddress.getByName(targetIp)
-                val packet = StreamHelper.createDatagramPacket(payload, address, targetPort)
-                socket?.send(packet)
-                packetCount++
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-    }
-
-    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 }
