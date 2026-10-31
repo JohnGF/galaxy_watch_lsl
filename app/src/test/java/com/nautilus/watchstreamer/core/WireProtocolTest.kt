@@ -1,6 +1,7 @@
 package com.nautilus.watchstreamer.core
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class WireProtocolTest {
@@ -29,5 +30,22 @@ class WireProtocolTest {
         val samples = listOf(WireProtocol.Sample(0L, floatArrayOf(72f)))
         val packet = WireProtocol.formatPacket("d", "L_wrist", (1L shl 32) + 5, WireProtocol.HR, samples)
         assertEquals("5", packet.split("|")[3])
+    }
+
+    @Test
+    fun testParsePing() {
+        assertEquals(42, WireProtocol.parsePing("W2P|42"))
+        assertNull(WireProtocol.parsePing("W2P|"))
+        assertNull(WireProtocol.parsePing("W2|dev|L_wrist|0|HR|0,72"))
+    }
+
+    @Test
+    fun testEchoPacket() {
+        // Ping ids stay below 2^24 so they survive the float channel exactly
+        val samples = listOf(WireProtocol.Sample(5_000_000_000L, floatArrayOf(16_777_215f, 85.5f)))
+        assertEquals(
+            "W2|d|L_wrist|9|ECHO|5000000000,1.6777215E7,85.5",
+            WireProtocol.formatPacket("d", "L_wrist", 9L, WireProtocol.ECHO, samples)
+        )
     }
 }

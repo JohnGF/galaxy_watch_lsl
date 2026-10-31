@@ -35,6 +35,7 @@ W2|<device_id>|<location>|<seq>|<kind>[@<rate_hz>]|<t_ns>,<v1>,...;<t_ns>,<v1>,.
 *   **Kinds**: `IMU@50` (accel + latest gyro, 5 samples per packet), `HR` (on each heart-rate event), `TOUCH` (x, y, touched), `HB` (once a second: sent, dropped, battery %).
 *   **`t_ns`**: `SensorEvent.timestamp` for sensor samples, `SystemClock.elapsedRealtimeNanos()` otherwise; same clock base, so the bridge maps every kind onto LSL time with one per-device offset.
 *   Built in `core/WireProtocol.kt`, tested in `WireProtocolTest`.
+*   **Clock sync (v1.3+)**: the app answers the bridge's `W2P|<id>` pings with `ECHO` packets (arrival time, turnaround) from a dedicated thread. The bridge uses them to measure each watch's clock offset and drift NTP-style, to within about ±2 ms on Wi-Fi.
 
 The `:mobile` phone app still sends the legacy single-device CSV (`accX,accY,accZ,gyroX,gyroY,gyroZ,hr,touchX,touchY,isTouched,timestampNs`), which the bridge publishes as `Smartwatch_IMU` / `Smartwatch_PPG`.
 

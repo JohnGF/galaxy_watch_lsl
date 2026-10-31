@@ -36,10 +36,13 @@ import com.nautilus.watchstreamer.core.StreamHelper
 import com.nautilus.watchstreamer.core.WireProtocol
 import com.nautilus.watchstreamer.core.WireProtocol.Sample
 import java.io.IOException
+import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.net.SocketTimeoutException
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Owns the whole streaming pipeline so it survives the screen going off.
@@ -93,8 +96,11 @@ class StreamingService : Service(), SensorEventListener {
     private lateinit var deviceId: String
     private var location = WireProtocol.LOCATIONS[0]
 
+    // Shared by the sensor thread and the echo thread
+    private val seq = AtomicLong()
+    private var echoThread: Thread? = null
+
     // Only touched on the sensor thread
-    private var seq = 0L
     private val latestGyro = FloatArray(3)
     private var imuBatch = ArrayList<Sample>(IMU_BATCH)
 
@@ -162,6 +168,7 @@ class StreamingService : Service(), SensorEventListener {
         }
         registerSensors()
         sensorHandler.post(heartbeat)
+        echoThread = Thread(::answerPings, "EchoThread").apply { start() }
         // Sticky: if the system kills the process under memory pressure, it is restarted and resumes streaming
         return START_STICKY
     }
@@ -266,7 +273,10 @@ class StreamingService : Service(), SensorEventListener {
                 runOnExecutor {
                     socket?.close()
                     socket = try {
-                        DatagramSocket().also { network.bindSocket(it) }
+                        DatagramSocket().also {
+                            network.bindSocket(it)
+                            it.soTimeout = 1000  // lets the echo thread notice a stop or a socket swap
+                        }
                     } catch (e: IOException) {
                         Log.w(TAG, "Cannot bind socket to Wi-Fi", e)
                         null
@@ -328,9 +338,8 @@ class StreamingService : Service(), SensorEventListener {
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
-    /** Call on the sensor thread only: it owns the sequence counter. */
     private fun send(kind: String, samples: List<Sample>, rateHz: Int = 0) {
-        val payload = WireProtocol.formatPacket(deviceId, location, seq++, kind, samples, rateHz)
+        val payload = WireProtocol.formatPacket(deviceId, location, seq.getAndIncrement(), kind, samples, rateHz)
         runOnExecutor {
             val s = socket
             val address = targetAddress
@@ -341,6 +350,40 @@ class StreamingService : Service(), SensorEventListener {
             try {
                 s.send(StreamHelper.createDatagramPacket(payload, address, TARGET_PORT))
                 packetCount++
+            } catch (e: IOException) {
+                droppedCount++
+            }
+        }
+    }
+
+    /**
+     * Answers the bridge's clock-sync pings (W2P|<id>) with ECHO(t2 = arrival, turnaround = t3 - t2).
+     * Replies straight from this thread, not through the executor, so no queueing sits between the
+     * timestamps and the wire; the bridge fits clock offset and drift from these exchanges.
+     */
+    private fun answerPings() {
+        val buffer = ByteArray(64)
+        while (isRunning) {
+            val s = socket
+            if (s == null) {
+                SystemClock.sleep(200)  // waiting for Wi-Fi
+                continue
+            }
+            val packet = DatagramPacket(buffer, buffer.size)
+            try {
+                s.receive(packet)
+            } catch (e: SocketTimeoutException) {
+                continue
+            } catch (e: IOException) {
+                continue  // socket closed by a network change or by onDestroy
+            }
+            val t2 = SystemClock.elapsedRealtimeNanos()
+            val pingId = WireProtocol.parsePing(String(packet.data, 0, packet.length)) ?: continue
+            val t3 = SystemClock.elapsedRealtimeNanos()
+            val values = floatArrayOf(pingId.toFloat(), (t3 - t2) / 1000f)
+            val payload = WireProtocol.formatPacket(deviceId, location, seq.getAndIncrement(), WireProtocol.ECHO, listOf(Sample(t2, values)))
+            try {
+                s.send(StreamHelper.createDatagramPacket(payload, packet.address, packet.port))
             } catch (e: IOException) {
                 droppedCount++
             }
