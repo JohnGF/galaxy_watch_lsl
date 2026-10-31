@@ -97,7 +97,7 @@ class MainActivity : Activity() {
 
         etIp = EditText(this).apply {
             setText(prefs().getString(StreamingService.PREF_TARGET_IP, StreamingService.DEFAULT_TARGET_IP))
-            hint = "PC Hotspot IP"
+            hint = "auto, or the PC's IP"
             textSize = 12f
             gravity = android.view.Gravity.CENTER
         }
@@ -292,6 +292,6 @@ class MainActivity : Activity() {
         controlsLayout.visibility = View.GONE
         touchSurface.visibility = View.VISIBLE
         val wifi = if (s.isWifiBound) "Wi-Fi OK" else "Waiting for Wi-Fi"
-        tvStreamStatus.text = "$wifi · sent ${s.packetCount} · dropped ${s.droppedCount}"
+        tvStreamStatus.text = "$wifi · ${s.targetDescription()}\nsent ${s.packetCount} · dropped ${s.droppedCount}"
     }
 }

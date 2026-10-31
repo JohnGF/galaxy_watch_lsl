@@ -16,6 +16,8 @@
     <!-- Request and bind to Wi-Fi so Wear OS does not fall back to the Bluetooth proxy -->
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- Receive the bridge's discovery broadcast while Wi-Fi is in power save -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
     <application
         android:allowBackup="true"
