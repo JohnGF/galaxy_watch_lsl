@@ -19,6 +19,22 @@ object WireProtocol {
 
     val LOCATIONS = listOf("L_wrist", "R_wrist", "L_ankle", "R_ankle")
 
+    const val BEACON_PORT = 5006
+    private const val BEACON_PREFIX = "W2B|"
+
+    /** A bridge announcing itself: "W2B|<hostname>|<udp_port>[|...]", broadcast to BEACON_PORT. */
+    data class Beacon(val host: String, val port: Int)
+
+    /** Parses a bridge discovery beacon, or returns null for anything else. */
+    fun parseBeacon(text: String): Beacon? {
+        if (!text.startsWith(BEACON_PREFIX)) return null
+        val parts = text.trim().split('|')
+        if (parts.size < 3) return null
+        val port = parts[2].toIntOrNull() ?: return null
+        if (port !in 1..65535) return null
+        return Beacon(parts[1], port)
+    }
+
     /** Ping id from a bridge clock-sync ping ("W2P|<id>"), or null for anything else. */
     fun parsePing(text: String): Int? {
         if (!text.startsWith(PING_PREFIX)) return null

@@ -48,4 +48,14 @@ class WireProtocolTest {
             WireProtocol.formatPacket("d", "L_wrist", 9L, WireProtocol.ECHO, samples)
         )
     }
+
+    @Test
+    fun parsesBridgeBeacons() {
+        assertEquals(WireProtocol.Beacon("lab-pc", 5005), WireProtocol.parseBeacon("W2B|lab-pc|5005|1"))
+        assertEquals(WireProtocol.Beacon("pc", 6000), WireProtocol.parseBeacon("W2B|pc|6000\n"))
+        assertNull(WireProtocol.parseBeacon("W2P|12"))
+        assertNull(WireProtocol.parseBeacon("W2B|pc|notaport"))
+        assertNull(WireProtocol.parseBeacon("W2B|pc|70000"))
+        assertNull(WireProtocol.parseBeacon("W2B|pc"))
+    }
 }

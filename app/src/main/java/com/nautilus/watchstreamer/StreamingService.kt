@@ -39,6 +39,7 @@ import java.io.IOException
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.net.SocketTimeoutException
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
@@ -59,7 +60,9 @@ class StreamingService : Service(), SensorEventListener {
         const val PREFS = "streamer"
         const val PREF_TARGET_IP = "target_ip"
         const val PREF_LOCATION = "location"
-        const val DEFAULT_TARGET_IP = "192.168.137.1"  // Default Hotspot IP
+        const val AUTO_TARGET = "auto"
+        // "auto": follow the bridge's discovery beacon instead of a typed-in IP
+        const val DEFAULT_TARGET_IP = AUTO_TARGET
         const val TARGET_PORT = 5005
 
         private const val TAG = "StreamingService"
@@ -92,6 +95,10 @@ class StreamingService : Service(), SensorEventListener {
     @Volatile private var socket: DatagramSocket? = null
     private var boundNetwork: Network? = null
     @Volatile private var targetAddress: InetAddress? = null
+    @Volatile private var targetPort = TARGET_PORT
+    @Volatile private var discoveredBridge: String? = null  // "host (ip:port)" once a beacon is heard
+    @Volatile private var wifiNetwork: Network? = null       // readable copy of boundNetwork for other threads
+    private var discoveryThread: Thread? = null
     private var targetIp = DEFAULT_TARGET_IP
     private lateinit var deviceId: String
     private var location = WireProtocol.LOCATIONS[0]
@@ -158,12 +165,16 @@ class StreamingService : Service(), SensorEventListener {
         isRunning = true
         acquireLocks()
         requestWifi()
-        executor.execute {
-            targetAddress = try {
-                InetAddress.getByName(targetIp)
-            } catch (e: IOException) {
-                Log.e(TAG, "Bad target address $targetIp", e)
-                null
+        if (isAutoTarget) {
+            discoveryThread = Thread(::discoverBridge, "DiscoveryThread").apply { start() }
+        } else {
+            executor.execute {
+                targetAddress = try {
+                    InetAddress.getByName(targetIp)
+                } catch (e: IOException) {
+                    Log.e(TAG, "Bad target address $targetIp", e)
+                    null
+                }
             }
         }
         registerSensors()
@@ -221,7 +232,7 @@ class StreamingService : Service(), SensorEventListener {
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentTitle("LSL streaming")
-            .setContentText("$location → $targetIp:$TARGET_PORT")
+            .setContentText("$location → ${targetDescription()}")
             .setCategory(NotificationCompat.CATEGORY_WORKOUT)
             .setOngoing(true)
             .setContentIntent(openIntent)
@@ -282,6 +293,7 @@ class StreamingService : Service(), SensorEventListener {
                         null
                     }
                     boundNetwork = network
+                    wifiNetwork = network
                 }
             }
 
@@ -291,6 +303,7 @@ class StreamingService : Service(), SensorEventListener {
                         socket?.close()
                         socket = null
                         boundNetwork = null
+                        wifiNetwork = null
                     }
                 }
             }
@@ -348,7 +361,7 @@ class StreamingService : Service(), SensorEventListener {
                 return@runOnExecutor
             }
             try {
-                s.send(StreamHelper.createDatagramPacket(payload, address, TARGET_PORT))
+                s.send(StreamHelper.createDatagramPacket(payload, address, targetPort))
                 packetCount++
             } catch (e: IOException) {
                 droppedCount++
@@ -388,6 +401,85 @@ class StreamingService : Service(), SensorEventListener {
                 droppedCount++
             }
         }
+    }
+
+    val isAutoTarget: Boolean
+        get() = targetIp.isBlank() || targetIp.equals(AUTO_TARGET, ignoreCase = true)
+
+    /** What the watch is sending to, for the notification and the status line. */
+    fun targetDescription(): String = when {
+        !isAutoTarget -> "$targetIp:$TARGET_PORT"
+        discoveredBridge != null -> "auto: $discoveredBridge"
+        else -> "auto: searching for bridge"
+    }
+
+    /**
+     * Listens for the bridge's "W2B|<host>|<port>" beacon (broadcast every second on BEACON_PORT)
+     * and sends to whoever sent it, so the PC's IP never has to be typed in. Keeps listening after
+     * the first beacon so a PC that changes IP (or a different bridge) is followed. A multicast lock
+     * is held only while no bridge is known: without it Wear OS filters broadcasts in power save,
+     * with it the radio wakes for every broadcast on the network.
+     */
+    private fun discoverBridge() {
+        val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        val lock = wifiManager.createMulticastLock("LSLStreamer::Discovery").apply { setReferenceCounted(false) }
+        val buffer = ByteArray(256)
+        var listener: DatagramSocket? = null
+        var listenerNetwork: Network? = null
+        try {
+            while (isRunning) {
+                val network = wifiNetwork
+                if (network == null) {
+                    SystemClock.sleep(500)  // waiting for Wi-Fi
+                    continue
+                }
+                if (listener == null || network != listenerNetwork) {
+                    listener?.close()
+                    listener = try {
+                        DatagramSocket(null).also {
+                            it.reuseAddress = true
+                            it.broadcast = true
+                            network.bindSocket(it)
+                            it.bind(InetSocketAddress(WireProtocol.BEACON_PORT))
+                            it.soTimeout = 2000
+                        }
+                    } catch (e: IOException) {
+                        Log.w(TAG, "Cannot listen for bridge beacons", e)
+                        SystemClock.sleep(2000)
+                        null
+                    }
+                    listenerNetwork = network
+                    continue
+                }
+                if (targetAddress == null) lock.acquire() else if (lock.isHeld) lock.release()
+                val packet = DatagramPacket(buffer, buffer.size)
+                try {
+                    listener.receive(packet)
+                } catch (e: SocketTimeoutException) {
+                    continue
+                } catch (e: IOException) {
+                    listener.close()
+                    listener = null
+                    continue
+                }
+                val beacon = WireProtocol.parseBeacon(String(packet.data, 0, packet.length)) ?: continue
+                if (packet.address != targetAddress || beacon.port != targetPort) {
+                    targetPort = beacon.port
+                    targetAddress = packet.address
+                    discoveredBridge = "${beacon.host} (${packet.address.hostAddress}:${beacon.port})"
+                    Log.i(TAG, "Bridge found: $discoveredBridge")
+                    updateNotification()
+                }
+            }
+        } finally {
+            listener?.close()
+            if (lock.isHeld) lock.release()
+        }
+    }
+
+    private fun updateNotification() {
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        manager.notify(NOTIFICATION_ID, buildNotification())
     }
 
     private fun runOnExecutor(task: () -> Unit) {
