@@ -24,15 +24,23 @@ graph LR
 
 ## Packet Format
 
-Data is sent over UDP, with each packet containing a single line of CSV-formatted text. The format is as follows:
+The watch app (`:app`, v1.2+) sends **W2** packets, the multi-device format shared with ESP32 boards and other wearables. Full spec: [nautilus_bci wearable protocol](https://johngf.github.io/nautilus_bci/guides/wearable_protocol/).
 
-```csv
-accX,accY,accZ,gyroX,gyroY,gyroZ,hr,touchX,touchY,isTouched,timestampNs
+```text
+W2|<device_id>|<location>|<seq>|<kind>[@<rate_hz>]|<t_ns>,<v1>,...;<t_ns>,<v1>,...
 ```
 
-*   **`timestampNs`**: the acquisition time of the sample. A packet is sent on every accelerometer event, stamped with `SensorEvent.timestamp`; gyroscope and heart-rate values ride along as their latest readings. Touch packets use `SystemClock.elapsedRealtimeNanos()`. Both run on the same clock base.
-*   **Heartbeat:** once a second the watch also sends `HB,sent,dropped,batteryPercent,timestampNs`. It has 5 fields, so the bridge's IMU parser (6+ fields) ignores it; newer bridges use it to tell a dropped device from a still one.
-*   This payload string is constructed in `core/StreamState.toPayloadString()` and is verified by tests in `StreamHelperTest`.
+*   **`device_id`**: `wear-` plus the last 6 characters of the watch's `ANDROID_ID`; stable across restarts.
+*   **`location`**: picked on the setup screen (`L_wrist`, `R_wrist`, `L_ankle`, `R_ankle`). Give each device a different one; the bridge names the LSL streams after it (`IMU_L_wrist`, `HR_L_wrist`, ...).
+*   **Kinds**: `IMU@50` (accel + latest gyro, 5 samples per packet), `HR` (on each heart-rate event), `TOUCH` (x, y, touched), `HB` (once a second: sent, dropped, battery %).
+*   **`t_ns`**: `SensorEvent.timestamp` for sensor samples, `SystemClock.elapsedRealtimeNanos()` otherwise; same clock base, so the bridge maps every kind onto LSL time with one per-device offset.
+*   Built in `core/WireProtocol.kt`, tested in `WireProtocolTest`.
+
+The `:mobile` phone app still sends the legacy single-device CSV (`accX,accY,accZ,gyroX,gyroY,gyroZ,hr,touchX,touchY,isTouched,timestampNs`), which the bridge publishes as `Smartwatch_IMU` / `Smartwatch_PPG`.
+
+### Several devices at once
+
+Install the app on each watch, pick a different location on each, and point them all at the same PC IP. One bridge handles all of them and prints a status line per device every 5 s (rate, packet loss, battery, last seen).
 
 ## Setup & Installation
 
@@ -59,7 +67,7 @@ uv run python scripts/bridges/smartwatch_lsl_bridge.py --mode udp --port 5005
 
 *(Note: The app streams to UDP port 5005 by default, so you must explicitly specify `--port 5005` as the bridge defaults to 8080).*
 
-This bridge script receives the UDP packets and publishes them as Lab Streaming Layer (LSL) streams `Smartwatch_IMU` and `Smartwatch_PPG`. It maps the `timestampNs` field onto the local LSL time, preserving the original acquisition time of the sensor data rather than the network arrival time.
+This bridge script receives the UDP packets and publishes one set of Lab Streaming Layer (LSL) streams per device (`IMU_<location>`, `HR_<location>`, `TOUCH_<location>`). It maps each device's `t_ns` onto the local LSL time, preserving the original acquisition time of the sensor data rather than the network arrival time. W2 needs a bridge from nautilus_bci with `scripts/bridges/wearable_protocol.py`.
 
 ## Project Structure
 - `:app` - Wear OS application module containing the UI and logic for smartwatches.

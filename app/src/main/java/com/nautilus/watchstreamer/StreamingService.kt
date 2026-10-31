@@ -26,13 +26,15 @@ import android.os.HandlerThread
 import android.os.IBinder
 import android.os.PowerManager
 import android.os.SystemClock
+import android.provider.Settings
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.wear.ongoing.OngoingActivity
 import androidx.wear.ongoing.Status
 import com.nautilus.watchstreamer.core.StreamHelper
-import com.nautilus.watchstreamer.core.StreamState
+import com.nautilus.watchstreamer.core.WireProtocol
+import com.nautilus.watchstreamer.core.WireProtocol.Sample
 import java.io.IOException
 import java.net.DatagramSocket
 import java.net.InetAddress
@@ -53,13 +55,17 @@ class StreamingService : Service(), SensorEventListener {
         const val ACTION_STOP = "com.nautilus.watchstreamer.STOP"
         const val PREFS = "streamer"
         const val PREF_TARGET_IP = "target_ip"
+        const val PREF_LOCATION = "location"
         const val DEFAULT_TARGET_IP = "192.168.137.1"  // Default Hotspot IP
         const val TARGET_PORT = 5005
 
         private const val TAG = "StreamingService"
         private const val CHANNEL_ID = "streaming"
         private const val NOTIFICATION_ID = 1
-        private const val IMU_PERIOD_US = 20_000  // 50 Hz, same as SENSOR_DELAY_GAME
+        private const val IMU_RATE_HZ = 50
+        private const val IMU_PERIOD_US = 1_000_000 / IMU_RATE_HZ
+        // 5 samples per packet: 10 packets/s instead of 50, which matters with four devices on one hotspot
+        private const val IMU_BATCH = 5
         private const val HEARTBEAT_MS = 1000L
     }
 
@@ -84,9 +90,13 @@ class StreamingService : Service(), SensorEventListener {
     private var boundNetwork: Network? = null
     @Volatile private var targetAddress: InetAddress? = null
     private var targetIp = DEFAULT_TARGET_IP
+    private lateinit var deviceId: String
+    private var location = WireProtocol.LOCATIONS[0]
 
     // Only touched on the sensor thread
-    private val streamState = StreamState()
+    private var seq = 0L
+    private val latestGyro = FloatArray(3)
+    private var imuBatch = ArrayList<Sample>(IMU_BATCH)
 
     @Volatile var isRunning = false
         private set
@@ -100,7 +110,8 @@ class StreamingService : Service(), SensorEventListener {
         override fun run() {
             val battery = (getSystemService(Context.BATTERY_SERVICE) as BatteryManager)
                 .getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
-            send(StreamHelper.formatHeartbeat(packetCount, droppedCount, battery, SystemClock.elapsedRealtimeNanos()))
+            val values = floatArrayOf(packetCount.toFloat(), droppedCount.toFloat(), battery.toFloat())
+            send(WireProtocol.HEARTBEAT, listOf(Sample(SystemClock.elapsedRealtimeNanos(), values)))
             sensorHandler.postDelayed(this, HEARTBEAT_MS)
         }
     }
@@ -111,6 +122,9 @@ class StreamingService : Service(), SensorEventListener {
         connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         sensorThread = HandlerThread("SensorThread").apply { start() }
         sensorHandler = Handler(sensorThread.looper)
+        // Stable per watch (and per signing key), so the bridge keeps the same LSL source_id across restarts
+        val androidId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID) ?: "unknown"
+        deviceId = "wear-" + androidId.takeLast(6)
     }
 
     override fun onBind(intent: Intent?): IBinder = binder
@@ -123,7 +137,9 @@ class StreamingService : Service(), SensorEventListener {
         if (isRunning) return START_STICKY
 
         // Read from prefs rather than the intent so a sticky restart (null intent) resumes to the same PC
-        targetIp = getSharedPreferences(PREFS, MODE_PRIVATE).getString(PREF_TARGET_IP, DEFAULT_TARGET_IP)!!
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        targetIp = prefs.getString(PREF_TARGET_IP, DEFAULT_TARGET_IP)!!
+        location = prefs.getString(PREF_LOCATION, WireProtocol.LOCATIONS[0])!!
         try {
             startInForeground()
         } catch (e: Exception) {
@@ -170,11 +186,8 @@ class StreamingService : Service(), SensorEventListener {
     /** Called from the touch surface; serialized onto the sensor thread with the IMU updates. */
     fun onTouch(x: Float, y: Float, touched: Boolean) {
         sensorHandler.post {
-            streamState.touchX = x
-            streamState.touchY = y
-            streamState.isTouched = if (touched) 1 else 0
-            streamState.timestampNs = SystemClock.elapsedRealtimeNanos()
-            send(StreamHelper.formatLSLData(streamState))
+            val values = floatArrayOf(x, y, if (touched) 1f else 0f)
+            send(WireProtocol.TOUCH, listOf(Sample(SystemClock.elapsedRealtimeNanos(), values)))
         }
     }
 
@@ -201,7 +214,7 @@ class StreamingService : Service(), SensorEventListener {
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentTitle("LSL streaming")
-            .setContentText("Sending to $targetIp:$TARGET_PORT")
+            .setContentText("$location → $targetIp:$TARGET_PORT")
             .setCategory(NotificationCompat.CATEGORY_WORKOUT)
             .setOngoing(true)
             .setContentIntent(openIntent)
@@ -294,28 +307,30 @@ class StreamingService : Service(), SensorEventListener {
 
         when (event.sensor.type) {
             Sensor.TYPE_ACCELEROMETER -> {
-                val values = StreamHelper.convertIMUData(event.values)
-                streamState.accelX = values[0]
-                streamState.accelY = values[1]
-                streamState.accelZ = values[2]
-                streamState.timestampNs = event.timestamp
-                send(StreamHelper.formatLSLData(streamState))
+                // One IMU sample per accelerometer event, paired with the latest gyroscope reading
+                val accel = StreamHelper.convertIMUData(event.values)
+                val values = floatArrayOf(accel[0], accel[1], accel[2], latestGyro[0], latestGyro[1], latestGyro[2])
+                imuBatch.add(Sample(event.timestamp, values))
+                if (imuBatch.size >= IMU_BATCH) {
+                    send(WireProtocol.IMU, imuBatch, IMU_RATE_HZ)
+                    imuBatch = ArrayList(IMU_BATCH)
+                }
             }
             Sensor.TYPE_GYROSCOPE -> {
-                val values = StreamHelper.convertIMUData(event.values)
-                streamState.gyroX = values[0]
-                streamState.gyroY = values[1]
-                streamState.gyroZ = values[2]
+                StreamHelper.convertIMUData(event.values).copyInto(latestGyro, endIndex = 3)
             }
             Sensor.TYPE_HEART_RATE -> {
-                streamState.heartRate = StreamHelper.convertPPGData(event.values[0])
+                val hr = StreamHelper.convertPPGData(event.values[0])
+                send(WireProtocol.HR, listOf(Sample(event.timestamp, floatArrayOf(hr))))
             }
         }
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
-    private fun send(payload: String) {
+    /** Call on the sensor thread only: it owns the sequence counter. */
+    private fun send(kind: String, samples: List<Sample>, rateHz: Int = 0) {
+        val payload = WireProtocol.formatPacket(deviceId, location, seq++, kind, samples, rateHz)
         runOnExecutor {
             val s = socket
             val address = targetAddress
